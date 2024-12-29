@@ -16,6 +16,7 @@ class SimpleReplayData(NamedTuple):
 
     x: torch.Tensor
     energy: torch.Tensor
+    trajectory: torch.Tensor # Full Trajectory
 
 
 def sample_without_replacement(logits: torch.Tensor, n: int) -> torch.Tensor:
@@ -246,6 +247,7 @@ class SimpleBuffer:
             energy=torch.zeros(
                 self.max_length,
             ).to(device),
+            trajectory=torch.zeros(self.max_length, 1000, dim).to(device) # Full Trajectory
         )
         self.possible_indices = torch.arange(self.max_length).to(device)
         self.device = device
@@ -270,14 +272,16 @@ class SimpleBuffer:
             return self.current_index
 
     @torch.no_grad()
-    def add(self, x: torch.Tensor, energy: torch.Tensor) -> None:
+    def add(self, x: torch.Tensor, energy: torch.Tensor, trajectory: torch.Tensor) -> None:
         """Add a new batch of generated data to the replay buffer."""
         batch_size = x.shape[0]
         x = x.to(self.device)
         energy = energy.to(self.device)
+        trajectory = trajectory.permute(1, 0, 2).to(self.device) # Full Trajectory
         indices = (torch.arange(batch_size) + self.current_index).to(self.device) % self.max_length
         self.buffer.x[indices] = x
         self.buffer.energy[indices] = energy
+        self.buffer.trajectory[indices] = trajectory # Full Trajectory
         new_index = self.current_index + batch_size
         if not self.is_full:
             self.is_full = new_index >= self.max_length
@@ -326,12 +330,13 @@ class SimpleBuffer:
                 ).to(self.device)
             else:
                 indices = torch.randperm(max_index)[:batch_size].to(self.device)
-        x, energy, indices = (
+        x, energy, indices, trajectory = ( # Full Trajectory
             self.buffer.x[indices],
             self.buffer.energy[indices],
             indices,
+            self.buffer.trajectory[indices], # Full Trajectory
         )
-        return x, energy, indices
+        return x, energy, indices, trajectory # Full Trajectory
 
     def sample_n_batches(
         self, batch_size: int, n_batches: int

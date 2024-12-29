@@ -2,6 +2,6 @@ defaults:
   - default
 
 # simulate DDP on CPU, useful for debugging
-accelerator: cpu
+accelerator: cuda
 devices: 2
 strategy: ddp_spawn

@@ -237,6 +237,8 @@ class MyMLP(nn.Module):
 
         in_size = emb_size + hidden_size if concat_t_emb else emb_size
         layers.append(nn.Linear(in_size, out_dim))
+        
+        # layers.append(nn.Sigmoid())
 
         self.layers = layers
         self.joint_mlp = nn.Sequential(*layers)
@@ -262,7 +264,10 @@ class MyMLP(nn.Module):
                 x = layer(x)
 
             else:
-                x = layer(x, t_emb)
+                if isinstance(layer, Block):
+                    x = layer(x, t_emb)  # Block expects two args
+                else:
+                    x = layer(x)  # Linear expects one arg
 
         return x
 

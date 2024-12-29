@@ -37,11 +37,14 @@ def negative_time_descent(x, energy_function, num_steps, dt=1e-4):
 
 
 def euler_maruyama_step(
-    sde: VEReverseSDE, t: torch.Tensor, x: torch.Tensor, dt: float, diffusion_scale=1.0
+    sde: VEReverseSDE, t: torch.Tensor, x: torch.Tensor, dt: float, diffusion_scale=1.0,
 ):
+
     # Calculate drift and diffusion terms
     drift = sde.f(t, x) * dt
-    diffusion = diffusion_scale * sde.g(t, x) * np.sqrt(dt) * torch.randn_like(x)
+    
+    # diffusion = diffusion_scale * sde.g(t, x) * np.sqrt(dt) * torch.randn_like(x)
+    diffusion = diffusion_scale * np.sqrt(dt) * torch.randn_like(x)
 
     # Update the state
     x_next = x + drift + diffusion
@@ -52,12 +55,14 @@ def integrate_pfode(
     sde: VEReverseSDE,
     x0: torch.Tensor,
     num_integration_steps: int,
-    reverse_time: bool = True,
+    reverse_time: bool = False,
 ):
     start_time = 1.0 if reverse_time else 0.0
     end_time = 1.0 - start_time
+    
+    eps = 1e-6
 
-    times = torch.linspace(start_time, end_time, num_integration_steps + 1, device=x0.device)[:-1]
+    times = torch.linspace(start_time + eps, end_time - eps, num_integration_steps + 1, device=x0.device)[:-1]
 
     x = x0
     samples = []
@@ -83,8 +88,10 @@ def integrate_sde(
 ):
     start_time = time_range if reverse_time else 0.0
     end_time = time_range - start_time
+    
+    eps = 1e-6
 
-    times = torch.linspace(start_time, end_time, num_integration_steps + 1, device=x0.device)[:-1]
+    times = torch.linspace(start_time + eps, end_time - eps, num_integration_steps + 1, device=x0.device)[:-1]
 
     x = x0
     samples = []
@@ -92,7 +99,7 @@ def integrate_sde(
     with conditional_no_grad(no_grad):
         for t in times:
             x, f = euler_maruyama_step(
-                sde, t, x, time_range / num_integration_steps, diffusion_scale
+                sde, t, x, time_range / num_integration_steps, diffusion_scale,
             )
             if energy_function.is_molecule:
                 x = remove_mean(x, energy_function.n_particles, energy_function.n_spatial_dim)
@@ -107,3 +114,36 @@ def integrate_sde(
         samples = torch.concatenate((samples, samples_langevin), axis=0)
 
     return samples
+
+def backward_drift_HPID(
+    x: torch.Tensor,
+    times: torch.Tensor,
+    beta: torch.Tensor,
+):
+    beta_sqrt = torch.sqrt(torch.tensor(beta, dtype=x.dtype, device=x.device))
+    tanh_term = torch.tanh(beta_sqrt * times)
+    
+    return -(beta_sqrt / tanh_term) * x
+
+def backward_integrate(
+    x1: torch.Tensor,
+    times: torch.Tensor,
+    num_integration_steps: int,
+    time_range=1.0,
+):
+    x = x1
+    beta = 0.01
+    dt = time_range / num_integration_steps
+    
+    for k in range(num_integration_steps):
+        t_cur = time_range - k * dt
+        mask = (times >= (k+1) * dt)
+        
+        if mask.any():
+            drift = backward_drift_HPID(x[mask], t_cur, beta)
+            
+            noise = torch.randn(x[mask].shape, device=x.device)
+            
+            x[mask] = x[mask] + drift * dt + np.sqrt(dt) * noise
+    
+    return x

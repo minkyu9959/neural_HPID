@@ -1,4 +1,5 @@
 import torch
+_EPSILON = 1e-6
 
 
 class SDE(torch.nn.Module):
@@ -34,9 +35,11 @@ class VEReverseSDE(torch.nn.Module):
         if t.dim() == 0:
             # repeat the same time for all points if we have a scalar time
             t = t * torch.ones(x.shape[0]).to(x.device)
-
+        
         score = self.score(t, x)
-        return self.g(t, x).pow(2) * score
+        
+        # return self.g(t, x).pow(2) * score
+        return score
 
     def g(self, t, x):
         g = self.noise_schedule.g(t)

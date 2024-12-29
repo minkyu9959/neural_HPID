@@ -5,8 +5,10 @@ import torch
 from torch.distributions import constraints
 
 
-class Prior:
-    def __init__(self, dim, scale, device="cpu"):
+class Prior: # Gaussian prior with multi-dim according to target energy.
+    def __init__(self, dim, scale, device="cuda"):
+
+        device = "cuda" # This is a hack to make the code run.
         self.dim = dim
         self.scale = scale
         self.dist = torch.distributions.MultivariateNormal(

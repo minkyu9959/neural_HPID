@@ -18,6 +18,7 @@ from torchmetrics import MeanMetric
 from dem.energies.base_energy_function import BaseEnergyFunction
 from dem.utils.data_utils import remove_mean
 from dem.utils.logging_utils import fig_to_image
+from dem.utils.debug import fprint
 
 from .components.clipper import Clipper
 from .components.cnf import CNF
@@ -28,9 +29,10 @@ from .components.mlp import TimeConder
 from .components.noise_schedules import BaseNoiseSchedule
 from .components.prioritised_replay_buffer import PrioritisedReplayBuffer
 from .components.scaling_wrapper import ScalingWrapper
-from .components.score_estimator import estimate_grad_Rt, wrap_for_richardsons
+from .components.score_estimator import estimate_grad_Rt, wrap_for_richardsons, harmonic_integral
 from .components.score_scaler import BaseScoreScaler
 from .components.sde_integration import integrate_sde
+from .components.sde_integration import backward_integrate
 from .components.sdes import VEReverseSDE
 
 
@@ -222,13 +224,18 @@ class DEMLitModule(LightningModule):
         self.dim = self.energy_function.dimensionality
 
         self.reverse_sde = VEReverseSDE(self.net, self.noise_schedule)
-
-        grad_fxn = estimate_grad_Rt
+            
+        grad_fxn = harmonic_integral
+        # grad_fxn = estimate_grad_Rt
         if use_richardsons:
             grad_fxn = wrap_for_richardsons(grad_fxn)
 
         self.clipper = clipper
         self.clipped_grad_fxn = self.clipper.wrap_grad_fxn(grad_fxn)
+
+        # self.clipper = clipper
+        # self.clipped_grad_fxn_numer = self.clipper.wrap_grad_fxn(grad_fxn_numer)
+        # self.clipped_grad_fxn_denom = self.clipper.wrap_grad_fxn(grad_fxn_denom)
 
         self.dem_train_loss = MeanMetric()
         self.cfm_train_loss = MeanMetric()
@@ -293,6 +300,7 @@ class DEMLitModule(LightningModule):
         self.prioritize_cfm_training_samples = prioritize_cfm_training_samples
         self.lambda_weighter = self.hparams.lambda_weighter(self.noise_schedule)
 
+        self.last_trajectory = None # Full Trajectory
         self.last_samples = None
         self.last_energies = None
         self.eval_step_outputs = []
@@ -347,53 +355,94 @@ class DEMLitModule(LightningModule):
         return error_norms
 
     def get_loss(self, times: torch.Tensor, samples: torch.Tensor) -> torch.Tensor:
-        estimated_score = estimate_grad_Rt(
+        
+        # Orginal iDEM ========================================================
+        
+        # estimated_score = estimate_grad_Rt(
+        #     times,
+        #     samples,
+        #     self.energy_function,
+        #     self.noise_schedule,
+        #     self.num_estimator_mc_samples,
+        # )
+        
+        # if self.clipper is not None and self.clipper.should_clip_scores:
+        #     if self.energy_function.is_molecule:
+        #         estimated_score = estimated_score.reshape(
+        #             -1,
+        #             self.energy_function.n_particles,
+        #             self.energy_function.n_spatial_dim,
+        #         )
+
+        #     estimated_score = self.clipper.clip_scores(estimated_score) 
+
+        #     if self.energy_function.is_molecule:
+        #         estimated_score = estimated_score.reshape(-1, self.energy_function.dimensionality)
+
+        # if self.score_scaler is not None:
+        #     estimated_score = self.score_scaler.scale_target_score(estimated_score, times)
+        
+        # predicted_score = self.forward(times, samples)
+        # error_norm = (predicted_score - estimated_score).pow(2).mean(-1)
+        
+        # ======================================================================
+        
+        estimated_optimal_control = harmonic_integral(
             times,
             samples,
             self.energy_function,
             self.noise_schedule,
-            num_mc_samples=self.num_estimator_mc_samples,
+            self.num_estimator_mc_samples,
         )
-
+        
         if self.clipper is not None and self.clipper.should_clip_scores:
-            if self.energy_function.is_molecule:
-                estimated_score = estimated_score.reshape(
-                    -1,
-                    self.energy_function.n_particles,
-                    self.energy_function.n_spatial_dim,
-                )
-
-            estimated_score = self.clipper.clip_scores(estimated_score)
-
-            if self.energy_function.is_molecule:
-                estimated_score = estimated_score.reshape(-1, self.energy_function.dimensionality)
-
-        if self.score_scaler is not None:
-            estimated_score = self.score_scaler.scale_target_score(estimated_score, times)
-
+            estimated_optimal_control = self.clipper.clip_scores(estimated_optimal_control)
+            
         predicted_score = self.forward(times, samples)
-
-        error_norms = (predicted_score - estimated_score).pow(2).mean(-1)
-
-        return self.lambda_weighter(times) * error_norms
+        error_norm = (predicted_score - estimated_optimal_control).pow(2).mean(-1)
+        
+        # ======================================================================
+        
+        # Nan debugging ========================================================
+        
+        # fprint(f"predicted_score, {predicted_score.isnan().sum()}")
+        # fprint(f"estimated_optimal_control, {estimated_optimal_control.isnan().sum()}")
+        # fprint(f"error_norm, {error_norm.isnan().sum()}")
+        
+        if error_norm.isnan().sum() > 0:
+            fprint(f"estimated_optimal_control, {estimated_optimal_control.isnan().sum()}")
+            fprint(f"predicted_score, {predicted_score.isnan().sum()}")
+            raise ValueError("Error norm is nan")
+        
+        # ======================================================================
+        
+        return self.lambda_weighter(times) * error_norm
 
     def training_step(self, batch, batch_idx):
         loss = 0.0
         if not self.hparams.debug_use_train_data:
             if self.hparams.use_buffer:
-                iter_samples, _, _ = self.buffer.sample(self.num_samples_to_sample_from_buffer)
+                iter_samples, _, _, iter_trajectory = self.buffer.sample(self.num_samples_to_sample_from_buffer)
             else:
                 iter_samples = self.prior.sample(self.num_samples_to_sample_from_buffer)
                 # Uncomment for SM
                 # iter_samples = self.energy_function.sample_train_set(self.num_samples_to_sample_from_buffer)
 
-            times = torch.rand(
-                (self.num_samples_to_sample_from_buffer,), device=iter_samples.device
-            )
+            # times = torch.rand(
+            #     (self.num_samples_to_sample_from_buffer,), device=iter_samples.device
+            # )
 
-            noised_samples = iter_samples + (
-                torch.randn_like(iter_samples) * self.noise_schedule.h(times).sqrt().unsqueeze(-1)
-            )
+            # noised_samples = iter_samples + (
+            #     torch.randn_like(iter_samples) * self.noise_schedule.h(times).sqrt().unsqueeze(-1)
+            # )
+            
+            integrate_times = torch.linspace(1e-6, 1.0 - 1e-6, self.num_integration_steps + 1, device=self.device)[:-1]
+            random_indices = torch.randperm(integrate_times.shape[0])
+            selected_indices = random_indices[:self.num_samples_to_sample_from_buffer]
+            
+            times = integrate_times[selected_indices]
+            
+            noised_samples = iter_trajectory[torch.arange(self.num_samples_to_sample_from_buffer), selected_indices, :]
 
             if self.energy_function.is_molecule:
                 noised_samples = remove_mean(
@@ -469,12 +518,13 @@ class DEMLitModule(LightningModule):
     ) -> torch.Tensor:
         num_samples = num_samples or self.num_samples_to_generate_per_epoch
 
-        samples = self.prior.sample(num_samples)
+        # samples = self.prior.sample(num_samples)
+        samples = 0.0 * self.prior.sample(num_samples) # Dirac delta prior samples
 
         return self.integrate(
             reverse_sde=reverse_sde,
             samples=samples,
-            reverse_time=True,
+            reverse_time=False,
             return_full_trajectory=return_full_trajectory,
             diffusion_scale=diffusion_scale,
             negative_time=negative_time,
@@ -484,7 +534,7 @@ class DEMLitModule(LightningModule):
         self,
         reverse_sde: VEReverseSDE = None,
         samples: torch.Tensor = None,
-        reverse_time=True,
+        reverse_time=False,
         return_full_trajectory=False,
         diffusion_scale=1.0,
         no_grad=True,
@@ -504,7 +554,7 @@ class DEMLitModule(LightningModule):
         if return_full_trajectory:
             return trajectory
 
-        return trajectory[-1]
+        return trajectory[-1], trajectory # Full Trajectory
 
     def compute_nll(
         self,
@@ -528,15 +578,15 @@ class DEMLitModule(LightningModule):
             reverse_sde = VEReverseSDE(
                 self.clipper_gen.wrap_grad_fxn(self.net), self.noise_schedule
             )
-            self.last_samples = self.generate_samples(
+            self.last_samples, self.last_trajectory = self.generate_samples( # Full Trajectory
                 reverse_sde=reverse_sde, diffusion_scale=self.diffusion_scale
             )
             self.last_energies = self.energy_function(self.last_samples)
         else:
-            self.last_samples = self.generate_samples(diffusion_scale=self.diffusion_scale)
+            self.last_samples, self.last_trajectory = self.generate_samples(diffusion_scale=self.diffusion_scale) # Full Trajectory
             self.last_energies = self.energy_function(self.last_samples)
 
-        self.buffer.add(self.last_samples, self.last_energies)
+        self.buffer.add(self.last_samples, self.last_energies, self.last_trajectory) # Full Trajectory
 
         self._log_energy_w2(prefix="val")
 
@@ -547,7 +597,7 @@ class DEMLitModule(LightningModule):
     def _log_energy_w2(self, prefix="val"):
         if prefix == "test":
             data_set = self.energy_function.sample_val_set(self.eval_batch_size)
-            generated_samples = self.generate_samples(
+            generated_samples, _ = self.generate_samples( # Full Trajectory
                 num_samples=self.eval_batch_size, diffusion_scale=self.diffusion_scale
             )
             generated_energies = self.energy_function(generated_samples)
@@ -571,7 +621,7 @@ class DEMLitModule(LightningModule):
     def _log_dist_w2(self, prefix="val"):
         if prefix == "test":
             data_set = self.energy_function.sample_val_set(self.eval_batch_size)
-            generated_samples = self.generate_samples(
+            generated_samples, _ = self.generate_samples( # Full Trajectory
                 num_samples=self.eval_batch_size, diffusion_scale=self.diffusion_scale
             )
         else:
@@ -595,7 +645,7 @@ class DEMLitModule(LightningModule):
     def _log_dist_total_var(self, prefix="val"):
         if prefix == "test":
             data_set = self.energy_function.sample_val_set(self.eval_batch_size)
-            generated_samples = self.generate_samples(
+            generated_samples, _ = self.generate_samples( # Full Trajectory
                 num_samples=self.eval_batch_size, diffusion_scale=self.diffusion_scale
             )
         else:
@@ -686,7 +736,7 @@ class DEMLitModule(LightningModule):
 
         # generate samples noise --> data if needed
         if backwards_samples is None or self.eval_batch_size > len(backwards_samples):
-            backwards_samples = self.generate_samples(
+            backwards_samples, _ = self.generate_samples(   # Full Trajectory
                 num_samples=self.eval_batch_size, diffusion_scale=self.diffusion_scale
             )
 
@@ -701,11 +751,19 @@ class DEMLitModule(LightningModule):
             self.eval_step_outputs.append({"gen_0": backwards_samples})
             return
 
-        times = torch.rand((self.eval_batch_size,), device=batch.device)
+        # times = torch.rand((self.eval_batch_size,), device=batch.device)
+        
+        integrate_times = torch.linspace(1e-6, 1.0 - 1e-6, self.num_integration_steps + 1, device=self.device)[:-1]
+        random_indices = torch.randperm(integrate_times.shape[0])
+        selected_indices = random_indices[:self.eval_batch_size]
+        
+        times = integrate_times[selected_indices]
 
-        noised_batch = batch + (
-            torch.randn_like(batch) * self.noise_schedule.h(times).sqrt().unsqueeze(-1)
-        )
+        # noised_batch = batch + (
+        #     torch.randn_like(batch) * self.noise_schedule.h(times).sqrt().unsqueeze(-1)
+        # )
+        
+        noised_batch = backward_integrate(batch, times, self.num_integration_steps)
 
         if self.energy_function.is_molecule:
             noised_batch = remove_mean(
@@ -740,7 +798,7 @@ class DEMLitModule(LightningModule):
             )
             to_log["gen_1_cfm"] = forwards_samples
 
-            iter_samples, _, _ = self.buffer.sample(self.eval_batch_size)
+            iter_samples, _, _, _ = self.buffer.sample(self.eval_batch_size) # Full Trajectory
 
             # compute nll on buffer if not training cfm only
             if not self.hparams.debug_use_train_data and self.nll_on_buffer:
@@ -779,7 +837,7 @@ class DEMLitModule(LightningModule):
 
         unprioritized_buffer_samples, cfm_samples = None, None
         if self.nll_with_cfm:
-            unprioritized_buffer_samples, _, _ = self.buffer.sample(
+            unprioritized_buffer_samples, _, _, _ = self.buffer.sample( # Full Trajectory
                 self.eval_batch_size,
                 prioritize=self.prioritize_cfm_training_samples,
             )
@@ -836,7 +894,7 @@ class DEMLitModule(LightningModule):
         print("Generating samples")
         for i in range(n_batches):
             start = time.time()
-            samples = self.generate_samples(
+            samples, _ = self.generate_samples( # Full Trajectory
                 num_samples=batch_size,
                 diffusion_scale=self.diffusion_scale,
                 negative_time=self.hparams.negative_time,
@@ -885,16 +943,20 @@ class DEMLitModule(LightningModule):
 
         reverse_sde = VEReverseSDE(_grad_fxn, self.noise_schedule)
 
-        self.prior = self.partial_prior(device=self.device, scale=self.noise_schedule.h(1) ** 0.5)
+        # self.prior = self.partial_prior(device=self.device, scale=self.noise_schedule.h(1) ** 0.5)
+        self.prior = self.partial_prior(device=self.device, scale=1.0) # Prior std
+
         if self.init_from_prior:
             init_states = self.prior.sample(self.num_init_samples)
         else:
-            init_states = self.generate_samples(
+            init_states, _ = self.generate_samples( # Full Trajectory
                 reverse_sde, self.num_init_samples, diffusion_scale=self.diffusion_scale
             )
         init_energies = self.energy_function(init_states)
+        
+        init_trajectory = init_states.unsqueeze(0).repeat(self.num_integration_steps, 1, 1) # Full Trajectory
 
-        self.buffer.add(init_states, init_energies)
+        self.buffer.add(init_states, init_energies, init_trajectory) # Full Trajectory
 
         if self.hparams.compile and stage == "fit":
             self.net = torch.compile(self.net)
@@ -913,6 +975,7 @@ class DEMLitModule(LightningModule):
         :return: A dict containing the configured optimizers and learning-rate schedulers to be used for training.
         """
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+        
         if self.hparams.scheduler is not None:
             scheduler = self.hparams.scheduler(optimizer=optimizer)
             return {
