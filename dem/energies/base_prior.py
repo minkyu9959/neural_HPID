@@ -26,13 +26,13 @@ class Prior: # Gaussian prior with multi-dim according to target energy.
 class MeanFreePrior(torch.distributions.Distribution):
     arg_constraints: Dict[str, constraints.Constraint] = {}
 
-    def __init__(self, n_particles, spatial_dim, scale, device="cpu"):
+    def __init__(self, n_particles, spatial_dim, scale, device="cuda"):
         super().__init__()
         self.n_particles = n_particles
         self.spatial_dim = spatial_dim
         self.dim = n_particles * spatial_dim
         self.scale = scale
-        self.device = device
+        self.device = "cuda" # This is a hack to make the code run.
 
     def log_prob(self, x):
         x = x.reshape(-1, self.n_particles, self.spatial_dim)

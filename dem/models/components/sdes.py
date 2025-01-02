@@ -1,4 +1,5 @@
 import torch
+from dem.models.components.score_estimator import harmonic_integral
 _EPSILON = 1e-6
 
 
@@ -26,19 +27,26 @@ class VEReverseSDE(torch.nn.Module):
     noise_type = "diagonal"
     sde_type = "ito"
 
-    def __init__(self, score, noise_schedule):
+    def __init__(self, score, noise_schedule, energy_function, is_HPID=False):
         super().__init__()
         self.score = score
         self.noise_schedule = noise_schedule
+        self.energy_function = energy_function
+        self.is_HPID = is_HPID
 
     def f(self, t, x):
         if t.dim() == 0:
             # repeat the same time for all points if we have a scalar time
             t = t * torch.ones(x.shape[0]).to(x.device)
-        
-        score = self.score(t, x)
-        
-        # return self.g(t, x).pow(2) * score
+            
+        if self.is_HPID:
+            # HPID's (forward) drift
+            score = self.score(t, x)
+            # score = harmonic_integral(t, x, self.energy_function, self.noise_schedule, 100)
+        else:
+            # iDEM's (reverse) drift
+            score = self.g(t, x).pow(2) * self.score(t, x)
+
         return score
 
     def g(self, t, x):

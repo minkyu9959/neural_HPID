@@ -85,6 +85,7 @@ class GMM(BaseEnergyFunction):
     def log_on_epoch_end(
         self,
         latest_samples: torch.Tensor,
+        latest_trajectory: torch.Tensor, # Draw Trajectory Figure #
         latest_energies: torch.Tensor,
         wandb_logger: WandbLogger,
         unprioritized_buffer_samples=None,
@@ -104,6 +105,8 @@ class GMM(BaseEnergyFunction):
                 # unnormalized space
                 if latest_samples is not None:
                     latest_samples = self.unnormalize(latest_samples)
+                if latest_trajectory is not None:
+                    latest_trajectory = self.unnormalize(latest_trajectory)
 
                 if unprioritized_buffer_samples is not None:
                     unprioritized_buffer_samples = self.unnormalize(unprioritized_buffer_samples)
@@ -129,6 +132,10 @@ class GMM(BaseEnergyFunction):
                 wandb_logger.log_image(f"{prefix}generated_samples_scatter", [fig_to_image(fig)])
                 img = self.get_single_dataset_fig(latest_samples, "dem_generated_samples")
                 wandb_logger.log_image(f"{prefix}generated_samples", [img])
+                
+            if latest_trajectory is not None: # Draw Trajectory Figure #
+                traj_img = self.draw_GMM_trajectory_figure(latest_trajectory, latest_trajectory.shape[1], (-1.4 * 40, 1.4 * 40))
+                wandb_logger.log_image(f"{prefix}trajectory", [traj_img])
 
             plt.close()
 
@@ -203,3 +210,79 @@ class GMM(BaseEnergyFunction):
         self.gmm.to(self.device)
 
         return fig_to_image(fig)
+    
+    # Draw Trajectory Figure #
+        
+    def draw_GMM_trajectory_figure(self, trajectory, num_samples, plotting_bounds=(-1.4 * 40, 1.4 * 40)):
+        
+        title = "Sample Trajectory"
+        
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+
+        self.gmm.to("cpu")
+        plot_contours(
+            self.gmm.log_prob,
+            bounds=plotting_bounds,
+            ax=ax,
+            n_contour_levels=50,
+            grid_width_n_points=200,
+        )
+        
+        trajectory = trajectory.cpu().detach()
+        
+        lineparams = {
+        # 'c': 'red',
+        'linewidth': 0.5,
+        }
+
+        arrowparams = {
+            'color': 'red',
+            'length_includes_head': False,
+            'head_width': 2.0,
+            'head_length': 4.0,
+        }
+
+        for i in range(num_samples):
+            self.draw_trajectory(ax, trajectory[:, i, :], lineparams, arrowparams)
+
+        ax.set_xlim(plotting_bounds)
+        ax.set_ylim(plotting_bounds)
+        ax.set_title(title)
+        
+        self.gmm.to(self.device)
+        
+        return fig_to_image(fig)
+        
+        
+    def draw_trajectory(self, ax, trajectory, lineparams=None, arrowparams=None):
+        
+        if lineparams is None:
+            lineparams = {}
+
+        ax.plot(trajectory[:, 0], trajectory[:, 1], **lineparams)
+
+        if arrowparams is None:
+            arrowparams = {}
+        else:
+            if "length_includes_head" not in arrowparams:
+                arrowparams["length_includes_head"] = True
+
+            if "lw" not in arrowparams:
+                arrowparams["lw"] = 0
+
+            if "head_width" not in arrowparams:
+                arrowparams["head_width"] = 0.5
+
+        length = len(trajectory)
+
+        dx = trajectory[-1, 0] - trajectory[-2, 0]
+        dy = trajectory[-1, 1] - trajectory[-2, 1]
+
+        ax.arrow(
+            trajectory[length - 1, 0],
+            trajectory[length - 1, 1],
+            dx,
+            dy,
+            shape="full",
+            **arrowparams,
+        )

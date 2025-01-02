@@ -34,26 +34,16 @@ def log_expectation_reward(
     repeated_t = t.unsqueeze(0).repeat_interleave(num_mc_samples, dim=0)
     repeated_x = x.unsqueeze(0).repeat_interleave(num_mc_samples, dim=0)
 
-    # h_t = noise_schedule.h(repeated_t).unsqueeze(1)
-    h_t = 0.01 * repeated_t.unsqueeze(1)
+    h_t = noise_schedule.h(repeated_t).unsqueeze(1)
 
     samples = repeated_x + (torch.randn_like(repeated_x) * h_t.sqrt())
-    # sigma = torch.sqrt(1 - t).unsqueeze(-1)
-    # samples = repeated_x + (torch.randn_like(repeated_x) * sigma)
 
     log_rewards = energy_function(samples)
 
     if clipper is not None and clipper.should_clip_log_rewards:
         log_rewards = clipper.clip_log_rewards(log_rewards)
-    
-    # d = samples.shape[-1]
-    # y_squared = (samples ** 2).sum(dim=-1)  # [batch_size * num_mc_samples]
-    # log_prob_y = -0.5 * y_squared - 0.5 * d * math.log(2 * math.pi)
-    # #log_prob_y = torch.distributions.Normal(loc=0.0, scale=1.0).log_prob(samples).sum(dim=-1)
-    # exponent_terms = log_rewards - log_prob_y  # [batch_size, num_samples]    
 
     return torch.logsumexp(log_rewards, dim=-1) - np.log(num_mc_samples)
-    #return torch.logsumexp(exponent_terms, dim=-1) - np.log(num_mc_samples)
 
 def estimate_grad_Rt(
     t: torch.Tensor,
@@ -90,7 +80,7 @@ def harmonic_IS(
     coth_term = 1 / torch.tanh(sqrt_beta)
 
     denominator = (cosh_term - sinh_term * coth_term).unsqueeze(-1)  # [batch_size, 1]
-    denominator = denominator + 1e-4 * (denominator == 0).float()
+    denominator = denominator + 1e-8 * (denominator == 0).float()
     mean = x / denominator  # [batch_size, dim]
 
     diag_val = sqrt_beta * (
@@ -112,27 +102,27 @@ def harmonic_IS(
     L = torch.linalg.cholesky(H_inv)  # [batch_size, dim, dim]
     y = mean.unsqueeze(1) + torch.matmul(z, L)  # [batch_size, num_mc_samples, dim]
     
-    if any(tensor.isnan().sum() > 0 for tensor in [denominator, mean, diag_val, H_inv, H, y]):
-        fprint(f"nan_check : denominator, {denominator.isnan().sum()}")
-        fprint(f"nan_check : mean, {mean.isnan().sum()}")
-        fprint(f"nan_check : diag_val, {diag_val.isnan().sum()}")
-        fprint(f"nan_check : H_inv, {H_inv.isnan().sum()}")
-        fprint(f"nan_check : H, {H.isnan().sum()}")
-        fprint(f"nan_check : y, {y.isnan().sum()}")
-        print("x :", x)
-        print("denominator :", denominator)
-        raise ValueError("제발 왜그러는거야")
+    # if any(tensor.isnan().sum() > 0 for tensor in [denominator, mean, diag_val, H_inv, H, y]):
+    #     fprint(f"nan_check : denominator, {denominator.isnan().sum()}")
+    #     fprint(f"nan_check : mean, {mean.isnan().sum()}")
+    #     fprint(f"nan_check : diag_val, {diag_val.isnan().sum()}")
+    #     fprint(f"nan_check : H_inv, {H_inv.isnan().sum()}")
+    #     fprint(f"nan_check : H, {H.isnan().sum()}")
+    #     fprint(f"nan_check : y, {y.isnan().sum()}")
+    #     print("x :", x)
+    #     print("denominator :", denominator)
+    #     raise ValueError("제발 왜그러는거야")
     
-    if any(tensor.isinf().sum() > 0 for tensor in [denominator, mean, diag_val, H_inv, H, y]):
-        fprint(f"inf_check : denominator, {denominator.isinf().sum()}")
-        fprint(f"inf_check : mean, {mean.isinf().sum()}")
-        fprint(f"inf_check : diag_val, {diag_val.isinf().sum()}")
-        fprint(f"inf_check : H_inv, {H_inv.isinf().sum()}")
-        fprint(f"inf_check : H, {H.isinf().sum()}")
-        fprint(f"inf_check : y, {y.isinf().sum()}")
-        print("x :", x)
-        print("denominator :", denominator)
-        raise ValueError("제발 왜그러는거야")
+    # if any(tensor.isinf().sum() > 0 for tensor in [denominator, mean, diag_val, H_inv, H, y]):
+    #     fprint(f"inf_check : denominator, {denominator.isinf().sum()}")
+    #     fprint(f"inf_check : mean, {mean.isinf().sum()}")
+    #     fprint(f"inf_check : diag_val, {diag_val.isinf().sum()}")
+    #     fprint(f"inf_check : H_inv, {H_inv.isinf().sum()}")
+    #     fprint(f"inf_check : H, {H.isinf().sum()}")
+    #     fprint(f"inf_check : y, {y.isinf().sum()}")
+    #     print("x :", x)
+    #     print("denominator :", denominator)
+    #     raise ValueError("제발 왜그러는거야")
 
     return H, mean, y
 
@@ -162,18 +152,24 @@ def compute_control(
     if clipper is not None and clipper.should_clip_log_rewards:
         log_rewards = clipper.clip_log_rewards(log_rewards)
 
-    x_squared = torch.sum(x**2, dim=-1, keepdim=True)
-    y_squared = torch.sum(y**2, dim=-1)
+    x_squared = torch.sum(x**2, dim=-1, keepdim=True) # Shape: (batch_size_x, 1)
+    y_squared = torch.sum(y**2, dim=-1) # Shape: (batch_size_y)
     inner_product = torch.sum(x.unsqueeze(1)*y, dim=-1)
+    # x_squared = torch.sum(x ** 2, dim=-1, keepdim=True)  # Shape: (batch_size_x, 1)
+    # y_squared = torch.sum(y ** 2, dim=-1)  # Shape: (batch_size_y)
+    # x_expanded = x.unsqueeze(1)  # Shape: (batch_size_x, 1, dim)
+    # y_expanded = y.unsqueeze(0)  # Shape: (1, batch_size_y, dim)
+    # inner_product = torch.sum(x_expanded * y_expanded, dim=-1)  # Shape: (batch_size_x, batch_size_y)
+
 
     log_G_ratio = (-beta_sqrt * (cosh_term.unsqueeze(-1)*(x_squared + y_squared) - 2*inner_product)
                    / (2 * sinh_term.unsqueeze(-1))) + (y_squared * beta_sqrt / 2) * coth_beta
 
-    exponent = log_rewards + log_G_ratio - mahalanobis
-    w = torch.softmax(exponent, dim=1)
+    exponent = log_rewards + log_G_ratio - mahalanobis # Shape: (batch_size_x, batch_size_y)
+    w = torch.softmax(exponent, dim=1) # Shape: (batch_size_x, batch_size_y)
 
-    weighted_sum = torch.sum(w.unsqueeze(-1)*y, dim=1)
-    u = (weighted_sum - x * cosh_term.unsqueeze(-1)) * (beta_sqrt / sinh_term.unsqueeze(-1))
+    weighted_sum = torch.sum(w.unsqueeze(-1)*y, dim=1) # Shape: (batch_size_x, dim)
+    u = (weighted_sum - x * cosh_term.unsqueeze(-1)) * (beta_sqrt / sinh_term.unsqueeze(-1)) # Shape: (batch_size_x, dim)
     
     if any(tensor.isnan().sum() > 0 for tensor in [mahalanobis, log_G_ratio, exponent, w, u]):
         fprint(f"nan_check : mahalanobis, {mahalanobis.isnan().sum()}")
@@ -201,9 +197,9 @@ def harmonic_integral(
     energy_function: BaseEnergyFunction,
     noise_schedule: BaseNoiseSchedule,
     num_mc_samples: int,
+    beta: float = 0.1,
     clipper: Clipper = None,
 ):
-    beta = 0.01
     
     H_inv, y_star, y = harmonic_IS(t, x, energy_function, num_mc_samples, beta)
     u = compute_control(t, x, y, y_star, H_inv, energy_function, num_mc_samples, beta, clipper)

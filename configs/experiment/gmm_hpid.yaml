@@ -7,9 +7,10 @@
 # this allows you to overwrite only specified parameters
 defaults:
   - override /energy: gmm
+  - override /model: hpid
   - override /model/noise_schedule: geometric
 
-tags: ["GMM", "iDEM"]
+tags: ["GMM", "HPID"]
 
 seed: 12345
 

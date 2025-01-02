@@ -213,6 +213,7 @@ class SimpleBuffer:
         dim: int,
         max_length: int,
         min_sample_length: int,
+        trajectory_length: int,
         initial_sampler: Callable[[], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
         device: str = "cpu",
         sample_with_replacement: bool = False,
@@ -242,12 +243,13 @@ class SimpleBuffer:
         self.dim = dim
         self.max_length = max_length
         self.min_sample_length = min_sample_length
+        self.trajectory_length = trajectory_length # Full Trajectory
         self.buffer = SimpleReplayData(
             x=torch.zeros(self.max_length, dim).to(device),
             energy=torch.zeros(
                 self.max_length,
             ).to(device),
-            trajectory=torch.zeros(self.max_length, 1000, dim).to(device) # Full Trajectory
+            trajectory=torch.zeros(self.max_length, self.trajectory_length, dim).to(device) # Full Trajectory
         )
         self.possible_indices = torch.arange(self.max_length).to(device)
         self.device = device

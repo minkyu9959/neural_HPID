@@ -43,9 +43,11 @@ def euler_maruyama_step(
     # Calculate drift and diffusion terms
     drift = sde.f(t, x) * dt
     
-    # diffusion = diffusion_scale * sde.g(t, x) * np.sqrt(dt) * torch.randn_like(x)
-    diffusion = diffusion_scale * np.sqrt(dt) * torch.randn_like(x)
-
+    if sde.is_HPID:
+        diffusion = diffusion_scale * np.sqrt(dt) * torch.randn_like(x)
+    else:
+        diffusion = diffusion_scale * sde.g(t, x) * np.sqrt(dt) * torch.randn_like(x)
+    
     # Update the state
     x_next = x + drift + diffusion
     return x_next, drift
@@ -60,7 +62,7 @@ def integrate_pfode(
     start_time = 1.0 if reverse_time else 0.0
     end_time = 1.0 - start_time
     
-    eps = 1e-6
+    eps = 0.0 if reverse_time else 1e-6
 
     times = torch.linspace(start_time + eps, end_time - eps, num_integration_steps + 1, device=x0.device)[:-1]
 
@@ -89,7 +91,7 @@ def integrate_sde(
     start_time = time_range if reverse_time else 0.0
     end_time = time_range - start_time
     
-    eps = 1e-6
+    eps = 0.0 if reverse_time else 1e-6
 
     times = torch.linspace(start_time + eps, end_time - eps, num_integration_steps + 1, device=x0.device)[:-1]
 
@@ -131,13 +133,13 @@ def backward_integrate(
     num_integration_steps: int,
     time_range=1.0,
 ):
-    x = x1
-    beta = 0.01
+    x = x1.clone()
+    beta = 1.0
     dt = time_range / num_integration_steps
     
     for k in range(num_integration_steps):
         t_cur = time_range - k * dt
-        mask = (times >= (k+1) * dt)
+        mask = (times <= (k+1) * dt)
         
         if mask.any():
             drift = backward_drift_HPID(x[mask], t_cur, beta)
